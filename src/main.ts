@@ -1,128 +1,67 @@
 import "dotenv/config";
+
 import {
   Client,
+  CommandInteraction,
   Events,
   GatewayIntentBits,
   SlashCommandBuilder,
 } from "discord.js";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { readdirSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
-});
-
-interface UserConversationHistory {
-  userId: string;
-  history: string[];
+interface CommandFile {
+  data: SlashCommandBuilder;
+  execute: (interaction: CommandInteraction) => Promise<void>;
 }
 
-const conversationHistory: UserConversationHistory[] = [];
+const commands: CommandFile[] = [];
 
-const googleGemini = new GoogleGenerativeAI(
-  process.env.GEMINI_API_KEY as string,
-).getGenerativeModel({ model: "gemini-1.5-flash" });
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const commandFiles = readdirSync(join(__dirname, "commands")).filter((file) =>
+  file.endsWith(".ts"),
+);
+
+for (const file of commandFiles) {
+  try {
+    const command = (await import(`./commands/${file}`)) as CommandFile;
+    commands.push(command);
+  } catch (error) {
+    console.error(`Error loading command ${file}:`, (error as Error).message);
+  }
+}
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once(Events.ClientReady, async () => {
-  console.log(`Ready! Logged in as ${client.user?.tag}`);
+  const isGlobal = process.argv.includes("--global");
 
   try {
-    const commands = [
-      new SlashCommandBuilder()
-        .setName("hello")
-        .setDescription("Replies concatenating the rest of the sentence"),
-      new SlashCommandBuilder()
-        .setName("ask")
-        .setDescription("Ask a question to Gemini")
-        .addStringOption((option) =>
-          option
-            .setName("question")
-            .setDescription("The question to ask Gemini")
-            .setRequired(true),
-        ),
-      new SlashCommandBuilder()
-        .setName("price")
-        .setDescription("Get the price from one currency to another")
-        .addStringOption((option) =>
-          option
-            .setName("source")
-            .setDescription("The currency to convert from")
-            .setRequired(true)
-            .addChoices(
-              { name: "USD", value: "USD" },
-              { name: "EUR", value: "EUR" },
-              { name: "GBP", value: "GBP" },
-              { name: "JPY", value: "JPY" },
-              { name: "AUD", value: "AUD" },
-              { name: "CAD", value: "CAD" },
-              { name: "BRL", value: "BRL" },
-            ),
-        )
-        .addStringOption((option) =>
-          option
-            .setName("target")
-            .setDescription("The currency to convert to")
-            .setRequired(true)
-            .addChoices(
-              { name: "USD", value: "USD" },
-              { name: "EUR", value: "EUR" },
-              { name: "GBP", value: "GBP" },
-              { name: "JPY", value: "JPY" },
-              { name: "AUD", value: "AUD" },
-              { name: "CAD", value: "CAD" },
-              { name: "BRL", value: "BRL" },
-            ),
-        ),
-      new SlashCommandBuilder()
-        .setName("translate")
-        .setDescription("Translate text from one language to another")
-        .addStringOption((option) =>
-          option
-            .setName("source_language")
-            .setDescription("The source language of the text to translate")
-            .setRequired(true)
-            .addChoices(
-              { name: "Alemão", value: "de" },
-              { name: "Inglês", value: "en" },
-              { name: "Chinês", value: "zh" },
-              { name: "Francês", value: "fr" },
-              { name: "Espanhol", value: "es" },
-              { name: "Português", value: "pt" },
-            ),
-        )
-        .addStringOption((option) =>
-          option
-            .setName("text")
-            .setDescription("The text to translate")
-            .setRequired(true),
-        )
-        .addStringOption((option) =>
-          option
-            .setName("target_language")
-            .setDescription("The language to translate to")
-            .setRequired(true)
-            .addChoices(
-              { name: "Alemão", value: "de" },
-              { name: "Inglês", value: "en" },
-              { name: "Chinês", value: "zh" },
-              { name: "Francês", value: "fr" },
-              { name: "Espanhol", value: "es" },
-              { name: "Português", value: "pt" },
-            ),
-        ),
-    ];
+    console.log(`Ready! Logged in as ${client.user?.tag}`);
 
-    for (const command of commands) {
-      await client.application?.commands.create(command.toJSON());
-    }
-
-    const fetchedCommands = await client.application?.commands.fetch();
-
-    if (fetchedCommands) {
-      const commandNames = fetchedCommands.map(({ name }) => name).join(", ");
-      console.log(`Comandos registrados: ${commandNames}`);
+    if (isGlobal) {
+      await client.application?.commands.set(
+        commands.map((command) => command.data.toJSON()),
+      );
     } else {
-      console.log("Nenhum comando registrado.");
+      const guild = await client.guilds.fetch(process.env.GUILD_ID as string);
+
+      if (!guild) {
+        console.error("Guild not found. Please check the GUILD_ID.");
+        process.exit(1);
+      }
+
+      await guild.commands.set(
+        commands.map((command) => command.data.toJSON()),
+      );
     }
+
+    console.log(
+      `Commands ${isGlobal ? "global" : "local"} loaded: ${commands
+        .map((command) => command.data.name)
+        .join(", ")}`,
+    );
   } catch (error) {
     console.error("Erro ao registrar comando:", (error as Error).message);
   }
@@ -131,113 +70,24 @@ client.once(Events.ClientReady, async () => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isCommand()) return;
 
-  const getOption = (label: string) => {
-    const option = interaction.options.get(label, true);
+  const command = commands.find(
+    ({ data }) => data.name === interaction.commandName,
+  );
 
-    return option.value as string;
-  };
+  if (!command) {
+    await interaction.reply("Comando não encontrado.");
+    return;
+  }
 
-  switch (interaction.commandName) {
-    case "hello":
-      await interaction.reply("+ ' World!'");
-      break;
-    case "ask":
-      const question = getOption("question");
+  try {
+    await command.execute(interaction);
+  } catch (error) {
+    console.error(
+      `Error executing command ${interaction.commandName}:`,
+      (error as Error).message,
+    );
 
-      await interaction.deferReply();
-
-      try {
-        const { response } = await googleGemini.generateContent([question]);
-
-        await interaction.editReply(response.text());
-      } catch (error) {
-        console.error("Error querying Gemini:", error);
-        await interaction.editReply("Houve um erro ao consultar o Gemini.");
-      }
-      break;
-    case "price":
-      const sourceCurrency = getOption("source");
-      const targetCurrency = getOption("target");
-
-      await interaction.deferReply();
-
-      try {
-        const response = await fetch(
-          `https://api.frankfurter.app/latest?from=${sourceCurrency}&to=${targetCurrency}`,
-          { method: "GET", headers: { "Content-Type": "application/json" } },
-        );
-
-        const data = await response.json();
-
-        if (data.rates[targetCurrency.toUpperCase()]) {
-          const currencyNames: { [key: string]: string } = {
-            USD: "Dólar Americano",
-            EUR: "Euro",
-            GBP: "Libra Esterlina",
-            JPY: "Iene Japonês",
-            AUD: "Dólar Australiano",
-            CAD: "Dólar Canadense",
-            BRL: "Real",
-          };
-
-          const sourceCurrencyName =
-            currencyNames[sourceCurrency.toUpperCase()];
-          const targetCurrencyName =
-            currencyNames[targetCurrency.toUpperCase()];
-
-          await interaction.editReply(
-            `O preço de ${sourceCurrencyName} para ${targetCurrencyName} é ${data.rates[targetCurrency.toUpperCase()]}.`,
-          );
-        } else {
-          await interaction.editReply("Moeda não suportada.");
-        }
-      } catch (error) {
-        console.error("Error fetching price:", error);
-        await interaction.editReply("Houve um erro ao consultar o preço.");
-      }
-      break;
-    case "translate":
-      const text = getOption("text");
-      const sourceLanguage = getOption("source_language");
-      const targetLanguage = getOption("target_language");
-
-      await interaction.deferReply();
-
-      try {
-        const response = await fetch(
-          `https://lingva.ml/api/v1/${sourceLanguage}/${targetLanguage}/${encodeURIComponent(text)}`,
-          {
-            method: "GET",
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-
-        const data = await response.json();
-
-        const languageMap: { [key: string]: string } = {
-          fr: "Francês",
-          de: "Alemão",
-          en: "Inglês",
-          es: "Espanhol",
-          zh: "Chinês",
-          pt: "Português",
-        };
-
-        const fullSourceLanguageName = languageMap[sourceLanguage];
-        const fullTargetLanguageName = languageMap[targetLanguage];
-
-        if (data.translation) {
-          await interaction.editReply(
-            `Texto traduzido de ${fullSourceLanguageName} para ${fullTargetLanguageName}: ${data.translation}`,
-          );
-        } else {
-          await interaction.editReply("Erro ao traduzir o texto.");
-        }
-      } catch (error) {
-        console.error("Error translating text:", error);
-        await interaction.editReply("Houve um erro ao traduzir o texto.");
-      }
-      break;
+    await interaction.reply("Ocorreu um erro ao executar este comando.");
   }
 });
 
